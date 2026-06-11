@@ -43,6 +43,7 @@
       box-shadow: 0 4px 18px rgba(0,0,0,.35);
       transition: transform .15s, box-shadow .15s;
       letter-spacing: .4px;
+      transition: 0.2s ease;
     }
     #tgh-btn:hover { transform: translateY(-2px); box-shadow: 0 6px 22px rgba(0,0,0,.4); }
 
@@ -80,6 +81,12 @@
       border-bottom: 1px solid rgba(255,255,255,.07);
       flex-shrink: 0;
     }
+    #tgh-header div {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      align-items: flex-start;
+    }
     #tgh-header h2 {
       margin: 0;
       font-size: 17px;
@@ -87,7 +94,7 @@
       color: #fff;
       letter-spacing: -.2px;
     }
-    #tgh-header span { font-size: 12px; color: #8a83a8; font-weight: 400; margin-left: 10px; }
+    #tgh-header span { font-size: 12px; color: #8a83a8; font-weight: 400; }
 
     #tgh-close {
       background: none;
@@ -105,12 +112,19 @@
       display: flex;
       gap: 8px;
       align-items: center;
+      justify-content: space-between;
       padding: 12px 24px;
       border-bottom: 1px solid rgba(255,255,255,.07);
       flex-shrink: 0;
       flex-wrap: wrap;
     }
-    #tgh-controls label { font-size: 12px; color: #8a83a8; }
+    #tgh-controls label {
+      font-size: 12px;
+      color: #8a83a8;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
     #tgh-days {
       background: #2a2238;
       border: 1px solid rgba(255,255,255,.1);
