@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         calendarHeatmap
 // @namespace    http://tampermonkey.net/
-// @version      1.2.0
+// @version      1.3.0
 // @description  heatmap overlay to Toggl Track showing when you work on each project
 // @author       ryzencatz
 // @match        https://track.toggl.com/*
@@ -64,7 +64,7 @@
       border: 3px solid rgb(151 141 204);
       box-shadow: 0 24px 80px rgba(0,0,0,.6);
       width: 60vw;
-      height: 90vh;
+      max-height: 90vh;
       overflow: hidden;
       display: flex;
       flex-direction: column;
@@ -347,14 +347,6 @@
       color: #8a83a8;
       margin-bottom: 4px;
     }
-
-    #tgh-combined-wrap { margin-bottom: 8px; }
-    .tgh-combined-label {
-      font-size: 12px;
-      color: #8a83a8;
-      margin-bottom: 6px;
-      font-weight: 500;
-    }
   `);
 
   // ─── State ────────────────────────────────────────────────────────────────
@@ -491,81 +483,63 @@
   }
 
   // ─── Peak window finder ───────────────────────────────────────────────────
-  // Sweep-line over actual start/end times (minutes-of-day).
-  // The peak window is [latest-start-among-overlapping, earliest-end-among-overlapping]
-  // at the moment of maximum simultaneous overlap.
+  // Finds the contiguous block of hours with the highest total minutes worked,
+  // then an optional secondary peak from the remaining hours.
   function findPeakWindows(entries) {
     if (!entries.length) return [];
-    const DAY = 1440;
 
-    function sweep(list) {
-      const events = [];
-      list.forEach(e => {
-        const startMs  = new Date(e.start).getTime();
-        const dayMs    = 86400000;
-        const startMod = ((startMs % dayMs) + dayMs) % dayMs;
-        const startMin = startMod / 60000;
-        const durMin   = Math.min(e.duration / 60, DAY);
-        if (durMin <= 0) return;
-        const endMin = startMin + durMin;
-        if (endMin > DAY) {
-          events.push({ t: startMin,      d: +1 });
-          events.push({ t: DAY,           d: -1 });
-          events.push({ t: 0,             d: +1 });
-          events.push({ t: endMin - DAY,  d: -1 });
-        } else {
-          events.push({ t: startMin, d: +1 });
-          events.push({ t: endMin,   d: -1 });
-        }
-      });
-
-      if (!events.length) return null;
-
-      // Sort by time; starts (+1) before ends (-1) at same time so a session
-      // that starts exactly when another ends counts as overlapping.
-      events.sort((a, b) => a.t - b.t || b.d - a.d);
-
-      let depth = 0, maxDepth = 0;
-      // bestStart = the time of the event that pushed depth to maxDepth
-      // bestEnd   = the earliest end-event that will reduce depth from maxDepth
-      let bestStart = 0, bestEnd = 0;
-
-      for (const ev of events) {
-        if (ev.d === +1) {
-          depth++;
-          if (depth > maxDepth) {
-            maxDepth  = depth;
-            bestStart = ev.t;   // exact moment the new peak depth was reached
-            bestEnd   = DAY;    // reset; tightened by first -1 at this depth
-          }
-        } else {
-          if (depth === maxDepth) {
-            // First end-event that reduces depth from the peak
-            bestEnd = ev.t;
-          }
-          depth--;
-        }
+    // Accumulate total minutes worked per hour-of-day across all entries
+    const minutesInHour = new Array(24).fill(0);
+    entries.forEach(e => {
+      let cursor = new Date(e.start).getTime();
+      const endMs = cursor + e.duration * 1000;
+      while (cursor < endMs) {
+        const h = new Date(cursor).getHours();
+        const nextHourMs = new Date(cursor).setMinutes(60, 0, 0);
+        const blockEnd = Math.min(endMs, nextHourMs);
+        minutesInHour[h] += (blockEnd - cursor) / 60000;
+        cursor = blockEnd;
       }
-
-      if (maxDepth === 0) return null;
-      return { startMin: bestStart, endMin: bestEnd, count: maxDepth };
-    }
-
-    const peak1 = sweep(entries);
-    if (!peak1) return [];
-
-    // Peak2: remove entries that touch the peak1 window
-    const remaining = entries.filter(e => {
-      const startMs  = new Date(e.start).getTime();
-      const dayMs    = 86400000;
-      const startMod = ((startMs % dayMs) + dayMs) % dayMs;
-      const s  = startMod / 60000;
-      const en = s + e.duration / 60;
-      return !(s < peak1.endMin && en > peak1.startMin);
     });
 
-    const peak2 = remaining.length >= 2 ? sweep(remaining) : null;
+    // Count distinct entries that touch a given hour (used for the ×N badge)
+    function countEntriesInHour(h) {
+      return entries.filter(e => {
+        let cursor = new Date(e.start).getTime();
+        const endMs = cursor + e.duration * 1000;
+        while (cursor < endMs) {
+          if (new Date(cursor).getHours() === h) return true;
+          cursor = new Date(cursor).setMinutes(60, 0, 0);
+        }
+        return false;
+      }).length;
+    }
 
+    // Grow a contiguous window outward from the peak hour while neighbours
+    // still contribute at least 15% of the peak hour's total minutes.
+    function buildWindow(mins) {
+      const peakVal = Math.max(...mins);
+      if (peakVal === 0) return null;
+      const peakH = mins.indexOf(peakVal);
+      const threshold = peakVal * 0.15;
+      let lo = peakH, hi = peakH;
+      while (lo > 0  && mins[lo - 1] >= threshold) lo--;
+      while (hi < 23 && mins[hi + 1] >= threshold) hi++;
+      return {
+        startMin: lo * 60,
+        endMin:   (hi + 1) * 60,
+        count:    countEntriesInHour(peakH),
+      };
+    }
+
+    const peak1 = buildWindow(minutesInHour);
+    if (!peak1) return [];
+
+    // Zero out peak1 hours then look for a secondary peak
+    const remaining = [...minutesInHour];
+    for (let h = peak1.startMin / 60; h < peak1.endMin / 60; h++) remaining[h] = 0;
+
+    const peak2 = buildWindow(remaining);
     const results = [peak1];
     if (peak2 && peak2.count >= 2 && peak2.count >= Math.ceil(peak1.count * 0.4)) {
       results.push(peak2);
@@ -632,99 +606,6 @@
     });
 
     const axisHTML = buildAxisHTML();
-
-    // ── Combined heatmap (canvas, continuous) ──
-function buildCombinedProjectBlocks() {
-  const row = document.createElement('div');
-  row.className = 'tgh-heatmap-row tgh-block-row';
-
-  const byProject = {};
-
-  state.entries.forEach(e => {
-    const pid = e.project_id || 0;
-
-    if (state.hiddenProjects.has(pid)) return;
-
-    if (!byProject[pid]) byProject[pid] = [];
-    byProject[pid].push(e);
-  });
-
-  Object.entries(byProject).forEach(([pid, entries]) => {
-    const proj = getProject(+pid);
-
-    const { minutesInHour } =
-      buildHourData(entries, false);
-
-    const maxMinutes = Math.max(...minutesInHour);
-
-    if (!maxMinutes) return;
-
-    const peakHour =
-      minutesInHour.indexOf(maxMinutes);
-
-    const block = document.createElement('div');
-
-    block.className = 'tgh-heat-block';
-
-    block.style.left =
-      `${peakHour / 24 * 100}%`;
-
-    block.style.width =
-      `${100 / 24}%`;
-
-    block.style.background =
-      proj.color;
-
-    block.style.opacity = '0.9';
-
-    block.dataset.project =
-      proj.name;
-
-    block.dataset.minutes =
-      Math.round(maxMinutes);
-
-    row.appendChild(block);
-  });
-
-  return row;
-}
-
-    const visibleEntries = state.entries.filter(e => !state.hiddenProjects.has(e.project_id || 0));
-    const combinedPeaks  = findPeakWindows(visibleEntries);
-
-    const combinedSection = document.createElement('div');
-    combinedSection.id = 'tgh-combined-wrap';
-
-    // Label row: "All projects combined" + peak badges
-    const combinedLabelRow = document.createElement('div');
-    combinedLabelRow.className = 'tgh-project-label-row';
-    combinedLabelRow.style.marginBottom = '6px';
-
-    const combinedNameEl = document.createElement('div');
-    combinedNameEl.className = 'tgh-combined-label';
-    combinedNameEl.style.margin = '0';
-    combinedNameEl.textContent = 'All projects combined';
-    combinedLabelRow.appendChild(combinedNameEl);
-
-    if (combinedPeaks.length) {
-      const badgesEl = document.createElement('div');
-      badgesEl.className = 'tgh-peak-badges';
-      combinedPeaks.forEach((pk, i) => {
-        const badge = document.createElement('span');
-        badge.className = 'tgh-peak-badge ' + (i === 0 ? 'primary' : 'secondary');
-        badge.innerHTML =
-          `${escHtml(fmtMin(pk.startMin))}–${escHtml(fmtMin(pk.endMin))}` +
-          `<span class="tgh-peak-n">×${pk.count}</span>`;
-        badgesEl.appendChild(badge);
-      });
-      combinedLabelRow.appendChild(badgesEl);
-    }
-
-    combinedSection.appendChild(combinedLabelRow);
-    const combinedRow = buildCombinedProjectBlocks();
-    combinedSection.appendChild(combinedRow);
-    combinedSection.insertAdjacentHTML('beforeend', axisHTML);
-    wrap.appendChild(combinedSection);
 
     // ── Per-project heatmaps ──
     const sortedPids = Object.keys(byProject).sort((a, b) =>
@@ -839,7 +720,7 @@ function buildCombinedProjectBlocks() {
     return row;
   }
 
-  // ── Canvas row (combined, continuous) ─────────────────────────────────────
+  // ── Canvas row (combined, continuous) — kept for potential reuse ───────────
   function buildCombinedCanvasRow(entries) {
     const MINS = 1440;
     const minuteData = new Array(MINS).fill(null).map(() => ({ total: 0, contrib: {} }));
